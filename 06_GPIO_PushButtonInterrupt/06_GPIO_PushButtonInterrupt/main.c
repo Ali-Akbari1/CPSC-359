@@ -201,7 +201,7 @@ void main()
 		}
 
         // Delay a little using a busy loop
-        value = 0x0000FFFF;
+      value = 0x0000FFFF;
     	while (value--) {
       	    asm volatile("nop");
     	}

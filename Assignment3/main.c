@@ -1,187 +1,263 @@
 // Ali Akbari 30171539
-// CPSC 359 Assignment 3
+// CPSC 359 Assignment 3 
 
 #include "gpio.h"
 #include "uart.h"
 #include "gic.h"
 #include "sysreg.h"
 
-// Global variables to store the current state
-volatile int state = 1; // Start in State 1
+/* GPIO Pin Assignments */
+#define BTN_A 0
+#define BTN_B 1
+#define LED_GREEN 16
+#define LED_YELLOW 12
+#define LED_RED 4
 
-// Function Prototypes
-void init_GPIO(void);
-void configure_interrupts(void);
-void delay(unsigned int cycles);
-void state1_logic(void);
-void state2_logic(void);
+/* State Identifiers */
+#define SLOW_MODE 0   // Slow LED sequence
+#define FAST_MODE 1   // Fast LED sequence
 
-// Interrupt Service Routines (ISRs)
-void button_A_ISR(void);
-void button_B_ISR(void);
+/* GPIO Interrupt ID */
+#define GPIO_IRQ_ID 96
 
-// Exception handler for IRQs
-void irq_handler(void);
+/* Shared State Variable (Used in ISR and Main) */
+volatile unsigned int currentState;
 
-void main() {
-    uart_init();         // Initialize UART
-    init_GPIO();         // Initialize GPIO pins
-    configure_interrupts(); // Set up interrupts
+/* Function Prototypes */
+// GPIO Functions
+void activate_LED(unsigned int pin);
+void deactivate_LED(unsigned int pin);
+void configure_GPIO_as_output(unsigned int pin);
 
-    // Enable IRQ Exceptions on the CPU
-    enableIRQ();
+// Interrupt Configuration
+void configure_interrupt_controller(void);
+void handle_interrupt(void);
+void setup_GPIO0_interrupt(void);
+void setup_GPIO1_interrupt(void);
 
-    while (1) {
-        if (state == 1) {
-            state1_logic(); // Execute State 1 logic
-        } else {
-            state2_logic(); // Execute State 2 logic
+// Helper Functions
+unsigned int read_GPIO0_state(void);
+unsigned int read_GPIO1_state(void);
+void wait_cycles(unsigned int cycles);
+
+// LED Sequences
+void run_slow_sequence(void);
+void run_fast_sequence(void);
+
+/* Main Program */
+void main()
+{
+    unsigned int localState;
+
+    // Initialize GPIO Pins and State
+    localState = currentState = SLOW_MODE;
+    configure_GPIO_as_output(LED_GREEN);
+    configure_GPIO_as_output(LED_YELLOW);
+    configure_GPIO_as_output(LED_RED);
+
+    // Setup GPIO Interrupts
+    setup_GPIO0_interrupt();
+    setup_GPIO1_interrupt();
+    configure_interrupt_controller();
+
+    // Turn off all LEDs initially
+    deactivate_LED(LED_GREEN);
+    deactivate_LED(LED_YELLOW);
+    deactivate_LED(LED_RED);
+
+    while (1)
+    {
+        // Detect state changes
+        if (localState != currentState)
+        {
+            // Turn off all LEDs and update state
+            deactivate_LED(LED_GREEN);
+            deactivate_LED(LED_YELLOW);
+            deactivate_LED(LED_RED);
+            localState = currentState;
+        }
+
+        // Execute LED sequence based on the state
+        if (localState == SLOW_MODE)
+        {
+            // Execute the slow LED blinking sequence
+            run_slow_sequence();
+        }
+        else if (localState == FAST_MODE)
+        {
+            // Execute the fast LED blinking sequence
+            run_fast_sequence();
         }
     }
 }
 
-// GPIO Initialization
-void init_GPIO() {
-    init_GPIO16_to_output(); // Green LED
-    init_GPIO12_to_output(); // Yellow LED
-    init_GPIO4_to_output();  // Red LED
+/* Interrupt Service Routine */
+void IRQ_handler()
+{
+    unsigned int ack = *GIC_GICC_IAR; // Acknowledge interrupt
+    unsigned int irqID = ack & 0x3FF; // Extract the interrupt ID
 
-    init_GPIO0_to_input();   // Button A
-    init_GPIO1_to_input();   // Button B
+    // Check if the interrupt was triggered by GPIO
+    if (irqID == GPIO_IRQ_ID)
+    {
+        // Read the state of both buttons
+        unsigned int buttonA_state = read_GPIO0_state();
+        unsigned int buttonB_state = read_GPIO1_state();
+
+        // Update shared state based on button inputs
+        if (buttonA_state == 1)
+        {
+            currentState = SLOW_MODE;
+        }
+        else if (buttonB_state == 0)
+        {
+            currentState = FAST_MODE;
+        }
+
+        // Clear interrupt flags for both buttons
+        *GPEDS0 = (1 << BTN_A) | (1 << BTN_B); // Clear interrupt flags
+    }
+
+    // Signal end of interrupt
+    *GIC_GICC_EOIR = ack; // End interrupt
 }
 
-// Configure Interrupts
-void configure_interrupts() {
-    // Enable rising-edge interrupt for GPIO 0 (Button A)
-    *GPREN0 |= (1 << 0);
+/* GPIO Interrupt Configurations */
+void setup_GPIO0_interrupt()
+{
+    unsigned int reg;
 
-    // Enable falling-edge interrupt for GPIO 1 (Button B)
-    *GPFEN0 |= (1 << 1);
+    // Set Button A (GPIO 0) as input with pull-down
+    reg = *GPFSEL0;
+    reg &= ~(0x7 << 0); // Clear function bits for GPIO 0
+    *GPFSEL0 = reg;
 
-    // Enable GPIO interrupts in the GIC
-    *(GIC_GICD_ISENABLER + (1 * 4)) = 0x00020000; // Enable Bank 0 GPIO interrupts
+    reg = *GPPUPPDN0;
+    reg &= ~(0x3 << (BTN_A * 2)); // Clear pull settings
+    reg |= (0x2 << (BTN_A * 2));  // Enable pull-down
+    *GPPUPPDN0 = reg;
 
-    // Enable forwarding of Group 1 interrupts
+    *GPREN0 |= (1 << BTN_A); // Enable rising-edge detection for GPIO 0
+    *GPEDS0 = (1 << BTN_A);  // Clear any pending events
+}
+
+void setup_GPIO1_interrupt()
+{
+    unsigned int reg;
+
+    // Set Button B (GPIO 1) as input with pull-up
+    reg = *GPFSEL0;
+    reg &= ~(0x7 << 3); // Clear function bits for GPIO 1
+    *GPFSEL0 = reg;
+
+    reg = *GPPUPPDN0;
+    reg &= ~(0x3 << (BTN_B * 2)); // Clear pull settings
+    reg |= (0x1 << (BTN_B * 2));  // Enable pull-up
+    *GPPUPPDN0 = reg;
+
+    *GPFEN0 |= (1 << BTN_B); // Enable falling-edge detection for GPIO 1
+    *GPEDS0 = (1 << BTN_B);  // Clear any pending events
+}
+
+/* Interrupt Controller Setup */
+void configure_interrupt_controller()
+{
+    // Disable the controller
+    *GIC_GICD_CTLR = 0x0;
+
+    // Clear and set interrupt settings
+    *(GIC_GICD_ICENABLER + (GPIO_IRQ_ID / 32)) = (1 << (GPIO_IRQ_ID % 32));
+    *((volatile unsigned char *)GIC_GICD_IPRIORITYR + GPIO_IRQ_ID) = 0xA0;
+    *((volatile unsigned char *)GIC_GICD_ITARGETSR + GPIO_IRQ_ID) = 0x1;
+
+    // Calculate the index and shift for the interrupt configuration register
+    unsigned int cfgIndex = GPIO_IRQ_ID / 16;
+    unsigned int cfgShift = (GPIO_IRQ_ID % 16) * 2;
+    unsigned int cfgValue = *(GIC_GICD_ICFGR + cfgIndex);
+    cfgValue &= ~(0x3 << cfgShift);
+    cfgValue |= (0x2 << cfgShift);
+    *(GIC_GICD_ICFGR + cfgIndex) = cfgValue;
+
+    // Enable the interrupt
+    *(GIC_GICD_ISENABLER + (GPIO_IRQ_ID / 32)) = (1 << (GPIO_IRQ_ID % 32));
     *GIC_GICD_CTLR = 0x1;
+    *GIC_GICC_PMR = 0xFF;
+    *GIC_GICC_CTLR = 0x1;
+
+    enableIRQ(); // Enable CPU IRQs
 }
 
-// Busy-loop delay
-void delay(unsigned int cycles) {
-    for (volatile unsigned int i = 0; i < cycles; i++) {
-        __asm__ volatile("nop");
+/* GPIO Helper Functions */
+void configure_GPIO_as_output(unsigned int pin)
+{
+    // Configure a GPIO pin as output by setting its function bits
+    volatile unsigned int *gpio_reg = GPFSEL0 + (pin / 10);
+    unsigned int shift = (pin % 10) * 3;
+
+    *gpio_reg &= ~(0x7 << shift);
+    *gpio_reg |= (0x1 << shift);
+}
+
+// Turn on an LED
+void activate_LED(unsigned int pin)
+{
+    *GPSET0 = (1 << pin);
+}
+
+// Turn off an LED
+void deactivate_LED(unsigned int pin)
+{
+    *GPCLR0 = (1 << pin);
+}
+
+// Read the state of Button A
+unsigned int read_GPIO0_state()
+{
+    return (*GPLEV0 & 0x1);
+}
+
+// Read the state of Button B
+unsigned int read_GPIO1_state()
+{
+    return ((*GPLEV0 >> 1) & 0x1);
+}
+
+/* Delay Function */
+void wait_cycles(unsigned int cycles)
+{
+    for (unsigned int i = 0; i < cycles; i++)
+    {
+        asm volatile("nop");
     }
 }
 
-// LED Control Logic for State 1
-void state1_logic() {
-    set_GPIO16(); // Turn on Green LED
-    delay(500000); // Delay ~0.5 seconds
-    clear_GPIO16();
+/* LED Sequences */
+void run_slow_sequence()
+{
+    activate_LED(LED_GREEN);
+    wait_cycles(5000000); // ~0.5 seconds
+    deactivate_LED(LED_GREEN);
 
-    set_GPIO12(); // Turn on Yellow LED
-    delay(500000); // Delay ~0.5 seconds
-    clear_GPIO12();
+    activate_LED(LED_YELLOW);
+    wait_cycles(5000000);
+    deactivate_LED(LED_YELLOW);
 
-    set_GPIO4(); // Turn on Red LED
-    delay(500000); // Delay ~0.5 seconds
-    clear_GPIO4();
+    activate_LED(LED_RED);
+    wait_cycles(5000000);
+    deactivate_LED(LED_RED);
 }
 
-// LED Control Logic for State 2
-void state2_logic() {
-    set_GPIO4(); // Turn on Red LED
-    delay(250000); // Delay ~0.25 seconds
-    clear_GPIO4();
+void run_fast_sequence()
+{
+    activate_LED(LED_RED);
+    wait_cycles(2500000); // ~0.25 seconds
+    deactivate_LED(LED_RED);
 
-    set_GPIO12(); // Turn on Yellow LED
-    delay(250000); // Delay ~0.25 seconds
-    clear_GPIO12();
+    activate_LED(LED_YELLOW);
+    wait_cycles(2500000);
+    deactivate_LED(LED_YELLOW);
 
-    set_GPIO16(); // Turn on Green LED
-    delay(250000); // Delay ~0.25 seconds
-    clear_GPIO16();
+    activate_LED(LED_GREEN);
+    wait_cycles(2500000);
+    deactivate_LED(LED_GREEN);
 }
-
-// ISR for Button A (State 1)
-void button_A_ISR() {
-    state = 1;
-    *GPEDS0 = (1 << 0); // Clear interrupt flag for GPIO 0
-}
-
-// ISR for Button B (State 2)
-void button_B_ISR() {
-    state = 2;
-    *GPEDS0 = (1 << 1); // Clear interrupt flag for GPIO 1
-}
-
-// GPIO interrupt handler (called by the exception vector)
-void irq_handler() {
-    // Check for interrupt on GPIO 0 (Button A)
-    if (*GPEDS0 & (1 << 0)) {
-        button_A_ISR();
-    }
-    // Check for interrupt on GPIO 1 (Button B)
-    if (*GPEDS0 & (1 << 1)) {
-        button_B_ISR();
-    }
-}
-
-
-void init_GPIO16_to_output() {
-    unsigned int r = *GPFSEL1;       // Read GPIO Function Select Register 1
-    r &= ~(0x7 << 18);               // Clear FSEL16 bits (GPIO16)
-    r |= (0x1 << 18);                // Set FSEL16 to output mode (0b001)
-    *GPFSEL1 = r;                    // Write back to the register
-}
-
-void init_GPIO12_to_output() {
-    unsigned int r = *GPFSEL1;       // Read GPIO Function Select Register 1
-    r &= ~(0x7 << 6);                // Clear FSEL12 bits (GPIO12)
-    r |= (0x1 << 6);                 // Set FSEL12 to output mode (0b001)
-    *GPFSEL1 = r;                    // Write back to the register
-}
-
-void init_GPIO4_to_output() {
-    unsigned int r = *GPFSEL0;       // Read GPIO Function Select Register 0
-    r &= ~(0x7 << 12);               // Clear FSEL4 bits (GPIO4)
-    r |= (0x1 << 12);                // Set FSEL4 to output mode (0b001)
-    *GPFSEL0 = r;                    // Write back to the register
-}
-
-void init_GPIO0_to_input() {
-    unsigned int r = *GPFSEL0;       // Read GPIO Function Select Register 0
-    r &= ~(0x7 << 0);                // Clear FSEL0 bits (GPIO0)
-    *GPFSEL0 = r;                    // Set GPIO0 to input mode (0b000)
-}
-
-void init_GPIO1_to_input() {
-    unsigned int r = *GPFSEL0;       // Read GPIO Function Select Register 0
-    r &= ~(0x7 << 3);                // Clear FSEL1 bits (GPIO1)
-    *GPFSEL0 = r;                    // Set GPIO1 to input mode (0b000)
-}
-
-
-void set_GPIO16() {
-    *GPSET0 = (1 << 16);             // Set GPIO16 high
-}
-
-void clear_GPIO16() {
-    *GPCLR0 = (1 << 16);             // Set GPIO16 low
-}
-
-void set_GPIO12() {
-    *GPSET0 = (1 << 12);             // Set GPIO12 high
-}
-
-void clear_GPIO12() {
-    *GPCLR0 = (1 << 12);             // Set GPIO12 low
-}
-
-void set_GPIO4() {
-    *GPSET0 = (1 << 4);              // Set GPIO4 high
-}
-
-void clear_GPIO4() {
-    *GPCLR0 = (1 << 4);              // Set GPIO4 low
-}
-    
