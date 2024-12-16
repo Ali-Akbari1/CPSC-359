@@ -1,4 +1,4 @@
-# CPSC 349, Computing Machinery II
+# CPSC 359, Computing Machinery II
 
 An introduction to hardware and microprocessor design, 
 
